@@ -44,7 +44,7 @@ void task2()
 	int data = 0;
 	while (true) {
 		unique_lock<mutex> lock(mtx);		
-		if (q.empty()) {
+		while (q.empty()) {
 			cv.wait(lock);				// 阻塞线程，防止资源消耗
 		}
 		if (!q.empty()) {
@@ -64,6 +64,173 @@ int main()
 	t2.join();
 }
 ```
+
+### promise future
+
+```c++
+#include <iostream>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <future>
+using namespace std;
+
+void task(int a, future<int>& b/*后提供的值*/, promise<int>& ret/*需要的值*/) {
+	int ret_a = a * a;
+	int ret_b = b.get() * 2;		// 阻塞获取未来提供到的值
+
+	ret.set_value(ret_a + ret_b);	// 提供需要的值
+}
+
+int main()
+{
+	int ret = 0;
+	promise<int> p_ret;
+	future<int> f_ret = p_ret.get_future();
+
+	promise<int> p_in;
+	future<int> f_in = p_in.get_future();
+
+	p_in.set_value(2);
+
+	thread t(task, 1, ref(f_in), ref(p_ret));
+	cout << f_ret.get() << endl;		// 阻塞直到p被赋值
+	t.join();
+}
+```
+
+future的get只能为一个线程使用，所以需要使用shared_future
+
+### async
+
+async函数可以获取线程中的函数返回值，并且类型为future
+
+```c++
+#include <iostream>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <future>
+using namespace std;
+
+int task(int a, int b) {
+	int ret_a = a * a;
+	int ret_b = b * 2;		
+	return ret_a + ret_b;	
+}
+
+int main()
+{
+    // launch::async和launch::deffered区别在于
+    // async 是创建一个新线程执行task
+    // deffered是延迟调用task（在get的时候执行）
+	future<int> f = async(launch::async | launch::deffered, task, 1, 2);
+	cout << f.get();
+}
+```
+
+### package_task
+
+```c++
+#include <iostream>
+#include <thread>
+#include <future>
+using namespace std;
+
+int task(int a, int b) {
+	int ret_a = a * a;
+	int ret_b = b * 2;		
+	return ret_a + ret_b;	
+}
+
+int main()
+{
+	packaged_task<int(int, int)> pt(task);	// 包装task，使它能够在其他地方使用
+	pt(1, 2);								// 传参
+	cout << pt.get_future().get();			// 获得返回值
+}
+```
+
+如何在定义packaged_task的时候就传递参数呢？
+
+#### bind
+
+使用bind绑定函数和参数就可以实现上述问题。但是它的实际原理使将参数转换成在函数内定义。
+
+```c++
+// 原本
+int task(int a, int b) {
+	int ret_a = a * a;
+	int ret_b = b * 2;		
+	return ret_a + ret_b;	
+}
+// bind(task,1,2)绑定后
+int task() {
+    int a = 1, b = 2;
+	int ret_a = a * a;
+	int ret_b = b * 2;		
+	return ret_a + ret_b;	
+}
+```
+
+所以在新的packaged_task中，就需要修改一下模板类型
+
+```c++
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <future>
+using namespace std;
+
+int task(int a, int b) {
+	int ret_a = a * a;
+	int ret_b = b * 2;		
+	return ret_a + ret_b;	
+}
+
+int main()
+{
+	packaged_task<int(/*此处不需要参数类型*/)> pt(bind(task,1,2));	// 包装task，使它能够在其他地方使用
+	pt();										// 调用
+	cout << pt.get_future().get();				// 获得返回值
+```
+
+### packaged_task和future可以实现异步编程和任务结果转递
+
+```c++
+#include <iostream>
+#include <future>
+
+int sum(int a, int b) {
+    return a + b;
+}
+
+int main() {
+    // 创建一个packaged_task，并绑定sum函数
+    std::packaged_task<int(int, int)> task(sum);
+
+    // 获取task的future
+    std::future<int> future = task.get_future();
+
+    // 创建一个线程，执行task
+    std::thread t(std::move(task), 2, 3);
+
+    // 等待任务执行完成并获取结果
+    int result = future.get();
+
+    // 打印结果
+    std::cout << "Result: " << result << std::endl;
+
+    // 等待线程结束
+    t.join();
+
+    return 0;
+}
+```
+
+- 注意：
+
+  ​	由于packaged_task不可拷贝构造，所以需要通过移动语义（move）传递给线程构造函数
 
 
 
