@@ -248,6 +248,10 @@ int main() {
 
 如果所有线程池线程始终`保持繁忙`，但队列中`包含挂起的工作`，则线程池在一段时间后创建另一个辅助线程但`线程总数不超过最大值`。超过最大值的线程可以排队，但他们要等待其他线程完成后才能启动。
 
+**问：线程运行完函数后自动就被系统回收了，怎么才能实现复用呢？**
+
+**答**：让线程执行一个死循环任务，当任务队列为空时，就让他阻塞防止资源浪费，当有任务时，解除阻塞，让线程向下执行，当执行完当前函数后，又会再次运行到死循环的的上方，继续向下执行，从而周而复始的不断接任务--完成任务--接任务的循环
+
 ==线程池主要维护一个任务队列以及若干个消费者线程==
 
 - 线程池的组成主要分为 `3` 个部分，这`三部分配合工作`就可以得到一个`完整的线程池`：
@@ -279,6 +283,8 @@ int main() {
 
 ![查看源图像](./C:/Users/Marvin/Desktop/编程学习/C++/C++11/assets/R9c00030b842edb1ae3d6a2b286e53916)
 
+
+
 ## 2. 写一个C++线程池
 
 ### 任务队列
@@ -288,82 +294,66 @@ int main() {
 首先先写一个任务的结构体
 
 ```c++
-// 函数指针类型起别名
-using callback = void(*)(void*);
-// 任务结构体
-struct Task
-{
-    // 无参构造
-	Task()
-	{
-		function = nullptr; 
-		arg = nullptr;
-	}
-    // 有参构造
-	Task(callback f, void* arg)
-	{
-		this->arg = arg;
-		this->function = function;
-	}
+#pragma once
+#ifndef _TASKQUEUE_H_
+#define _TASKQUEUE_H_
 
-	callback function; // 回调函数指针
-	void* arg; //回调函数参数
-};
-```
-
-声明一个任务队列的类
-
-```c++
+#include <queue>
+#include <functional>
+#include <mutex>
+#include <future>
+#include <iostream>
+using namespace std;
 class TaskQueue
 {
 public:
-	// 添加任务
-	void addTask(Task task);
-    // 重载
-	void addTask(callback f, void* arg);
-	// 取出任务
-	Task takeTask();
-	// 获取队列任务个数
-	inline int taskCount()
-	{
-		return m_taskQ.size();
-	}
+	using Task = function<void()>; // 任务类
+	template<typename F, typename ...Args>
+	auto addTask(F& f, Args &&...args)->future<decltype(f(args...))>;
+	Task taskTake();				// 取任务
+	bool empty() { return taskQueue.empty(); }
 private:
-	std :: queue<Task> m_taskQ; // 声明任务队列
-	std :: mutex m_mutex;       // 锁
+	mutex taskQueueMutex;		// 任务队列互斥锁
+	queue<Task> taskQueue;		// 任务队列
 };
+
+template <typename F, typename ...Args>
+auto TaskQueue::addTask(F& f, Args &&...args)->future<decltype(f(args...))> {
+	using RetType = decltype(f(args...));		// 获取函数返回值类型
+	// 将函数封装为无形参的类型 std::bind(f, std::forward<Args>(args)...)：将参数与函数名绑定
+	// packaged_task<RetType()>(std::bind(f, std::forward<Args>(args)...)); 将绑定参数后的函数封装为只有返回值没有形参的任务对象，\
+	这样就能使用get_future得到future对象，然后future对象可以通过get方法获取返回值了
+	// std::make_shared<std::packaged_task<RetType()>>(std::bind(f, std::forward<Args>(args)...)); 生成智能指针，离开作用域自动析构
+	auto task = make_shared<packaged_task<RetType()>>(bind(f, forward<Args>(args)...));
+	lock_guard<mutex> lockGuard(taskQueueMutex); // 插入时上锁，防止多个线程同时插入
+	// 将函数封装为无返回无形参类型，通过lamdba表达式，调用封装后的函数，注意，此时返回一个无形参无返回值的函数对象
+	taskQueue.emplace([task] {(*task)(); });	// emplace直接在队尾进行元素构造并插入
+	return task->get_future();
+}
+
+#endif // !_TASKQUEUE_H_
 ```
 
 #### TaskQueue.cpp
 
 ```c++
-#include "TaskQueue.h" //头文件
+#include "TaskQueue.h"
 
-void TaskQueue::addTask(Task task)
+/**
+ * 从任务队列中取任务
+ */
+TaskQueue::Task TaskQueue::taskTake()
 {
-	m_mutex.lock();
-	m_taskQ.push(task);
-	m_mutex.unlock();
-}
-
-void TaskQueue::addTask(callback f, void* arg)
-{
-	m_mutex.lock();
-	m_taskQ.push(Task(f, arg));
-	m_mutex.unlock();
-}
-
-Task TaskQueue::takeTask()
-{
-	m_mutex.lock();
-	Task t;
-	if (!m_taskQ.empty())
+	Task task;
+	lock_guard<mutex> lockGuard(taskQueueMutex);
+	if (!taskQueue.empty())
 	{
-		t = m_taskQ.front();
-		m_taskQ.pop();
+		task = move(taskQueue.front());
+		taskQueue.pop();	// 将任务从队列中删除
+		return task;
 	}
-	m_mutex.unlock();
-	return t;
+	return nullptr;
 }
+
 ```
 
